@@ -1,0 +1,177 @@
+// apogee-scheduler's tests: cron expressions (fields, names, L, #, steps,
+// next/previous run dates, zones), frequencies, conditions, hooks, locks,
+// jobs and commands, seconds tasks, and the schedule:* commands.
+import "std"
+import "../src/all.grav"
+use apogee.*
+
+class Ran { static log: Array<string> = new Array<string>()  static lock: Mutex = new Mutex()
+    static fn add(s: string) { Ran.lock.lock(); Ran.log.push(s); Ran.lock.unlock() }
+    static fn text() -> string { Ran.lock.lock(); let t = Str.join(Ran.log, ","); Ran.lock.unlock(); return t }
+    static fn reset() { Ran.lock.lock(); Ran.log = new Array<string>(); Ran.lock.unlock() } }
+
+class Prune extends Job {
+    public days: int = 0
+    constructor(days: int = 0) { self.days = days }
+    fn handle() { Ran.add("prune ${self.days}") }
+}
+
+fn at(text: string) -> Moment { return Moment.parse(text, "UTC") }
+
+test "cron: fields, names, ranges, steps, lists, L, LW, #, seconds, shorthands" {
+    let c = CronExpression.parse("*/15 9-17 * * MON-FRI")
+    assertEq("${c.isDue(at("2026-11-16 09:45"))} ${c.isDue(at("2026-11-16 09:50"))} ${c.isDue(at("2026-11-14 10:00"))} ${c.isDue(at("2026-11-16 18:00"))}", "true false false false")
+    assertEq(CronExpression.parse("0 0 L * *").isDue(at("2026-02-28")), true)
+    assertEq(CronExpression.parse("0 0 LW * *").isDue(at("2026-05-29")), true)       // the 31st is a Sunday
+    assertEq("${CronExpression.parse("0 9 * * 5L").isDue(at("2026-11-27 09:00"))} ${CronExpression.parse("0 9 * * 1#2").isDue(at("2026-11-09 09:00"))}", "true true")
+    assertEq(CronExpression.parse("0 0 1,15 JAN,JUL *").isDue(at("2026-07-15")), true)
+    assertEq(CronExpression.parse("0 12 * * 7").isDue(at("2026-11-15 12:00")), true)  // 7 is Sunday too
+    assertEq(CronExpression.parse("30 */10 * * * *").isDue(at("2026-11-14 10:20:30")), true)   // with seconds
+    assertEq(CronExpression.parse("@daily").expression, "@daily")
+    assertEq(CronExpression.parse("@weekly").isDue(at("2026-11-15 00:00")), true)
+    assertEq(CronExpression.parse("0 0 13 * 5").isDue(at("2026-11-06")), true)      // day 13 OR a Friday
+    for (bad in ["* * *", "60 * * * *", "* 24 * * *", "5-1 * * * *", "*/0 * * * *", "* * * FOO *"]) { assertEq(CronExpression.isValid(bad), false) }
+}
+
+test "cron: next and previous run dates, across months and zones" {
+    let c = CronExpression.parse("0 9 * * 1-5")
+    assertEq(c.nextRunDate(at("2026-11-14 10:00")).toDateTimeString(), "2026-11-16 09:00:00")
+    assertEq(c.previousRunDate(at("2026-11-16 08:00")).toDateTimeString(), "2026-11-13 09:00:00")
+    assertEq(CronExpression.parse("0 0 29 2 *").nextRunDate(at("2026-03-01")).toDateString(), "2028-02-29")
+    assertEq(CronExpression.parse("0 0 L * *").nextRunDate(at("2026-02-15")).toDateString(), "2026-02-28")
+    let dates = CronExpression.parse("*/20 * * * *").nextRunDates(at("2026-11-14 10:05"), 3)
+    assertEq(collect(dates).map(fn(m: Moment) -> string { return m.format("H:i") }).join(","), "10:20,10:40,11:00")
+    let nairobi = Moment.parse("2026-11-14 08:00", "Africa/Nairobi")
+    assertEq(CronExpression.parse("0 9 * * *").nextRunDate(nairobi).format("H:i e"), "09:00 Africa/Nairobi")
+    assertEq(CronExpression.parse("30 10 20 * * *").nextRunDate(at("2026-11-14 10:20:31")).toDateTimeString(), "2026-11-14 20:10:30")   // (seconds first)
+}
+
+test "frequencies write the cron expressions Laravel's do" {
+    let s = new Schedule()
+    let f = fn() {}
+    let exprs: Array<string> = [s.call(f).everyMinute().cronText, s.call(f).everyFiveMinutes().cronText, s.call(f).hourlyAt(17).cronText,
+                 s.call(f).dailyAt("13:05").cronText, s.call(f).twiceDaily(1, 13).cronText, s.call(f).weeklyOn(1, "8:00").cronText,
+                 s.call(f).monthlyOn(4, "15:00").cronText, s.call(f).lastDayOfMonth("17:00").cronText, s.call(f).quarterly().cronText,
+                 s.call(f).yearlyOn(6, 1, "17:00").cronText, s.call(f).weekdays().at("9:30").cronText, s.call(f).everyTwoHours(15).cronText,
+                 s.call(f).days([0, 3]).hourly().cronText, s.call(f).everyThirtyMinutes().cronText]
+    assertEq(Str.join(exprs, " | "), "* * * * * | */5 * * * * | 17 * * * * | 5 13 * * * | 0 1,13 * * * | 0 8 * * 1 | 0 15 4 * * | 0 17 L * * | 0 0 1 1,4,7,10 * | 0 17 1 6 * | 30 9 * * 1-5 | 15 */2 * * * | 0 * * * 0,3 | 0,30 * * * *")
+    let caught = false
+    try { s.call(f).everyNSeconds(7) } catch (e: ValueError) { caught = true }
+    assertEq(caught, true)
+}
+
+test "running what is due: conditions, environments, between, hooks, failures, maintenance" {
+    Ran.reset()
+    let s = new Schedule()
+    s.timezone = "UTC"
+    s.environment = "production"
+    s.call(fn() { Ran.add("every") }).everyMinute()
+    s.call(fn() { Ran.add("nine") }).dailyAt("09:00")
+    s.call(fn() { Ran.add("never") }).everyMinute().when(fn() -> bool { return false })
+    s.call(fn() { Ran.add("skipped") }).everyMinute().skip(fn() -> bool { return true })
+    s.call(fn() { Ran.add("staging") }).everyMinute().environments(["staging"])
+    s.call(fn() { Ran.add("office") }).everyMinute().between("08:00", "17:00")
+    s.call(fn() { Ran.add("night") }).everyMinute().between("22:00", "06:00")
+    s.call(fn() { throw new StateError("down") }).everyMinute().name("flaky")
+        .before(fn(t: ScheduledTask) { Ran.add("before") })
+        .onFailure(fn(t: ScheduledTask) { Ran.add("failed: " + t.lastError.message()) })
+        .onSuccess(fn(t: ScheduledTask) { Ran.add("never succeeds") })
+    let r = s.runDue(at("2026-11-14 09:00"))
+    assertEq(Ran.text(), "every,nine,office,before,failed: down")
+    assertEq("${r.ran.size()} ${r.failed}", "3 [\"flaky\"]")
+    Ran.reset()
+    s.maintenance = fn() -> bool { return true }
+    s.call(fn() { Ran.add("always") }).everyMinute().evenInMaintenanceMode()
+    s.runDue(at("2026-11-14 23:30"))
+    assertEq(Ran.text(), "always")
+}
+
+test "zones: a task reads its time in its own zone" {
+    Ran.reset()
+    let s = new Schedule()
+    s.timezone = "Africa/Nairobi"
+    s.call(fn() { Ran.add("nairobi 9") }).dailyAt("09:00")
+    s.call(fn() { Ran.add("new york 1") }).dailyAt("01:00").timezone("America/New_York")
+    s.runDue(at("2026-11-14 06:00"))                              // 09:00 in Nairobi, 01:00 in New York
+    assertEq(Ran.text(), "nairobi 9,new york 1")
+}
+
+test "overlaps and one server: locks in the shared cache" {
+    Ran.reset()
+    let cache = new CacheRepository(new MemoryCacheStore())
+    let a = new Schedule(cache)
+    let b = new Schedule(cache)                                   // a second server
+    for (s in [a, b]) { s.call(fn() { Ran.add("report") }).everyMinute().name("report").onOneServer() }
+    a.runDue(at("2026-11-14 09:00"))
+    let rb = b.runDue(at("2026-11-14 09:00"))
+    assertEq("${Ran.text()} ${rb.skipped}", "report [\"report\"]")
+    Ran.reset()
+    let slow = new Schedule(cache)
+    slow.call(fn() { Ran.add("long"); Time.sleepMs(300) }).everyMinute().name("long").withoutOverlapping().runInBackground()
+    let t = Thread.spawn(fn() { slow.runDue(at("2026-11-14 09:01")) })
+    Time.sleepMs(100)
+    let second = slow.runDue(at("2026-11-14 09:02"))
+    t.join()
+    assertEq("${Ran.text()} ${second.skipped}", "long [\"long\"]")
+    assertEq(slow.clearLocks(), 1)
+}
+
+test "jobs go on the queue, commands to the console, shell commands run with their output" {
+    Ran.reset()
+    let c = new Container()
+    let q = new QueueManager(c)
+    q.addConnection("memory", new MemoryQueueDriver())
+    q.defaultConnection = "memory"
+    let console = new ConsoleKernel(c)
+    console.command("emails:digest {--to=all}", fn(cmd: ClosureCommand) -> int { cmd.line("sent to " + cmd.option("to")); return 0 })
+    let s = new Schedule()
+    s.timezone = "UTC"
+    s.queue = q
+    s.commands = fn(line: string) -> int { let code = console.call(line); s.lastCommandOutput = console.output(); return code }
+    let job = new Prune(30)
+    s.job(job, "maintenance").daily()
+    let cmd = s.command("emails:digest --to=admins").daily()
+    let log = Path.combine(Dir.temp(), "apogee-schedule-test.log")
+    new File(log).delete()
+    s.exec("echo backed up").daily().appendOutputTo(log)
+    s.runDue(at("2026-11-14 00:00"))
+    s.runDue(at("2026-11-15 00:00"))
+    assertEq("${q.size("maintenance")} ${cmd.lastOutput} ${new File(log).read()}", "2 sent to admins\n backed up\nbacked up\n")
+    let o = new WorkerOptions(); o.stopWhenEmpty = true; o.memoryMb = 0; o.sleep = 0.01
+    q.worker().work("memory", ["maintenance"], o)
+    assertEq(Ran.text(), "prune 30,prune 30")
+    new File(log).delete()
+}
+
+test "seconds tasks run through the rest of the minute" {
+    Ran.reset()
+    let s = new Schedule()
+    s.call(fn() { Ran.add("minute") }).everyMinute()
+    s.call(fn() { Ran.add("tick") }).everyNSeconds(1)
+    s.runDue(at("2026-11-14 09:00:00"))
+    assertEq(Ran.text(), "minute,tick")
+    Ran.reset()
+    s.runDue(at("2026-11-14 09:00:07"))                           // a minute task waits for second 0
+    assertEq(Ran.text(), "tick")
+}
+
+test "the schedule:* commands" {
+    Ran.reset()
+    let c = new Container()
+    let s = new Schedule()
+    s.timezone = "UTC"
+    c.instance::<Schedule>(s)
+    s.call(fn() { Ran.add("cleanup") }).everyFiveMinutes().name("cleanup").description("Drop stale rows")
+    s.call(fn() { Ran.add("report") }).dailyAt("07:00").name("daily report")
+    let console = new ConsoleKernel(c)
+    registerScheduleCommands(console)
+    console.call("schedule:list")
+    let list = console.output()
+    assertEq(Str.contains(list, "*/5 * * * *  cleanup — Drop stale rows") && Str.contains(list, "0 7 * * *    daily report") && Str.contains(list, "Next Due:"), true)
+    assertEq(console.call("schedule:test --name=report"), 0)
+    assertEq(Str.contains(console.output(), "Running [daily report]") && Ran.text() == "report", true)
+    assertEq(console.call("schedule:test", ["0"]), 0)
+    assertEq(Ran.text(), "report,cleanup")
+    assertEq(console.call("schedule:interrupt"), 0)
+    assertEq(s.cache.has(Schedule.interruptKey), true)
+}
