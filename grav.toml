@@ -3,9 +3,9 @@ lib = "src/all.grav"
 paths = ["src"]
 
 [dependencies]
-apogee-support = { path = "../apogee-support" }
-apogee-queue = { path = "../apogee-queue" }
-apogee-console = { path = "../apogee-console" }
+apogee-support = "github.com/venomous-maker/apogee-support"
+apogee-queue = "github.com/venomous-maker/apogee-queue"
+apogee-console = "github.com/venomous-maker/apogee-console"
 apogee-container = "github.com/venomous-maker/apogee-container"
 apogee-events = "github.com/venomous-maker/apogee-events"
-grav-cache = { path = "../grav-cache" }
+grav-cache = "github.com/venomous-maker/grav-cache"
