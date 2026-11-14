@@ -3,7 +3,7 @@ apogee-support = { source = "github.com/venomous-maker/apogee-support", version 
 apogee-queue = { source = "github.com/venomous-maker/apogee-queue", version = "", commit = "603f779509572fa6ca185ebaf5e7dab8c776ce48" }
 grav-redis = { source = "github.com/venomous-maker/grav-redis", version = "", commit = "37d0f0d8734d40ba492a3cd9d6396bc8e3ec7bc2" }
 grav-db = { source = "github.com/venomous-maker/grav-db", version = "", commit = "a490e10948381b4a312701856abd153f7beab4fa" }
-apogee-console = { source = "github.com/venomous-maker/apogee-console", version = "", commit = "2d465af73c46de02442e210c480103ae0f2f7c4d" }
+apogee-console = { source = "github.com/venomous-maker/apogee-console", version = "", commit = "bdb24bd66da5daf21569cba4c6ccd0d1af0ab101" }
 apogee-container = { source = "github.com/venomous-maker/apogee-container", version = "", commit = "d25e33256e482a0a2c115c26c421b2e4cd12cf3a" }
 apogee-events = { source = "github.com/venomous-maker/apogee-events", version = "", commit = "c90ece23ea297db40249d1e0975a39db13e167bb" }
 grav-cache = { source = "github.com/venomous-maker/grav-cache", version = "", commit = "69d2769e6d7520b2b20c94415286597024047f01" }

@@ -65,7 +65,7 @@ namespace apogee {
                 let next = t.nextRunDate(now).inZone(TimeZone.of(tz == "" ? TimeZone.local().name : tz));
                 let label = t.label() + (t.repeatSeconds > 0 ? " (every ${t.repeatSeconds}s)" : "") + (t.taskDescription == "" ? "" : " — " + t.taskDescription);
                 self.output.twoColumn("<fg=yellow>" + Text.padRight(t.cronText, width) + "</>  " + label,
-                                      "<fg=gray>Next Due:</> " + next.diffForHumans(now));
+                                      "<fg=gray>Next Due:</> " + next.diffForHumans());
             }
             return 0;
         }
