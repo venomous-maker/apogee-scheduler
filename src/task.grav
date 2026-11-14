@@ -1,0 +1,251 @@
+// task.grav — ScheduledTask: one thing the schedule runs (a function, a
+// queued job, a console command, or a shell command), when, under which
+// conditions, and what happens around it.
+//
+//   schedule.command("reports:send --daily").dailyAt("07:30").timezone("Africa/Nairobi")
+//       .weekdays().withoutOverlapping().onOneServer().onFailure(fn(t: ScheduledTask) { alert(t) })
+//   schedule.job(new PruneSessions()).hourly()
+//   schedule.call(fn() { cleanup() }).everyFiveMinutes().between("08:00", "18:00").name("cleanup")
+//   schedule.exec("pg_dump app > /backups/app.sql").daily().appendOutputTo("/var/log/backup.log")
+//   schedule.call(fn() { poll() }).everyTenSeconds()          // sub-minute: schedule:run stays for the minute
+import "std"
+import "std/net"
+import "apogee-support"
+import "apogee-queue"
+import "grav-cache"
+import "cron.grav"
+
+namespace apogee {
+
+    class ScheduledTask {
+        // "call", "job", "command", "exec".
+        public kind: string
+        public cronText: string = "* * * * *"
+        public tz: string = ""
+        public taskName: string = ""
+        public taskDescription: string = ""
+        // Every this many seconds within a minute (0: once a minute at most).
+        public repeatSeconds: int = 0
+        public onlyEnvironments: Array<string>
+        public overlapMinutes: long = 0
+        public preventOverlaps: bool = false
+        public oneServer: bool = false
+        public background: bool = false
+        public evenInMaintenance: bool = false
+        public outputFile: string = ""
+        public appendOutput: bool = false
+        // What it runs.
+        public callback: fn() = null
+        public job: Job = null
+        public commandLine: string = ""
+        // The last run: its exit code (0 for a function or job that returned), output, and error.
+        public exitCode: int = 0
+        public lastOutput: string = ""
+        public lastError: Exception = null
+        private filters: Array<fn() -> bool>
+        private rejects: Array<fn() -> bool>
+        private befores: Array<fn(ScheduledTask)>
+        private afters: Array<fn(ScheduledTask)>
+        private successes: Array<fn(ScheduledTask)>
+        private failures: Array<fn(ScheduledTask)>
+        private parsed: CronExpression = null
+        // (set by the schedule)
+        public schedule: Schedule = null
+
+        constructor(kind: string) {
+            self.kind = kind;
+            self.onlyEnvironments = new Array<string>();
+            self.filters = new Array<fn() -> bool>();
+            self.rejects = new Array<fn() -> bool>();
+            self.befores = new Array<fn(ScheduledTask)>();
+            self.afters = new Array<fn(ScheduledTask)>();
+            self.successes = new Array<fn(ScheduledTask)>();
+            self.failures = new Array<fn(ScheduledTask)>();
+        }
+
+        // ── when ────────────────────────────────────────────────────────────────
+        fn cron(expression: string) -> ScheduledTask { self.cronText = expression; self.parsed = CronExpression.parse(expression); return self; }
+        private fn field(i: int, value: string) -> ScheduledTask {
+            let parts = Str.split(self.cronText, " ");
+            parts[i] = value;
+            return self.cron(Str.join(parts, " "));
+        }
+        fn everySecond() -> ScheduledTask { return self.everyNSeconds(1); }
+        fn everyTwoSeconds() -> ScheduledTask { return self.everyNSeconds(2); }
+        fn everyFiveSeconds() -> ScheduledTask { return self.everyNSeconds(5); }
+        fn everyTenSeconds() -> ScheduledTask { return self.everyNSeconds(10); }
+        fn everyFifteenSeconds() -> ScheduledTask { return self.everyNSeconds(15); }
+        fn everyTwentySeconds() -> ScheduledTask { return self.everyNSeconds(20); }
+        fn everyThirtySeconds() -> ScheduledTask { return self.everyNSeconds(30); }
+        // Every `n` seconds (a divisor of 60): schedule:run stays for the rest of the minute.
+        fn everyNSeconds(n: int) -> ScheduledTask {
+            if (n < 1 || 60 % n != 0) { throw new ValueError("every ${n} seconds: n must divide 60"); }
+            self.repeatSeconds = n;
+            return self.cron("* * * * *");
+        }
+        fn everyMinute() -> ScheduledTask { return self.field(0, "*"); }
+        fn everyTwoMinutes() -> ScheduledTask { return self.field(0, "*/2"); }
+        fn everyThreeMinutes() -> ScheduledTask { return self.field(0, "*/3"); }
+        fn everyFourMinutes() -> ScheduledTask { return self.field(0, "*/4"); }
+        fn everyFiveMinutes() -> ScheduledTask { return self.field(0, "*/5"); }
+        fn everyTenMinutes() -> ScheduledTask { return self.field(0, "*/10"); }
+        fn everyFifteenMinutes() -> ScheduledTask { return self.field(0, "*/15"); }
+        fn everyThirtyMinutes() -> ScheduledTask { return self.field(0, "0,30"); }
+        fn hourly() -> ScheduledTask { return self.field(0, "0"); }
+        fn hourlyAt(minute: int) -> ScheduledTask { return self.field(0, "${minute}"); }
+        fn everyOddHour(minute: int = 0) -> ScheduledTask { self.field(0, "${minute}"); return self.field(1, "1-23/2"); }
+        fn everyTwoHours(minute: int = 0) -> ScheduledTask { self.field(0, "${minute}"); return self.field(1, "*/2"); }
+        fn everyThreeHours(minute: int = 0) -> ScheduledTask { self.field(0, "${minute}"); return self.field(1, "*/3"); }
+        fn everyFourHours(minute: int = 0) -> ScheduledTask { self.field(0, "${minute}"); return self.field(1, "*/4"); }
+        fn everySixHours(minute: int = 0) -> ScheduledTask { self.field(0, "${minute}"); return self.field(1, "*/6"); }
+        fn daily() -> ScheduledTask { self.field(0, "0"); return self.field(1, "0"); }
+        // At "HH:MM" (on whatever days the rest says).
+        fn at(time: string) -> ScheduledTask {
+            let parts = Str.split(time, ":");
+            let h = Integer.parseOr(parts[0], -1);
+            let m = parts.size() > 1 ? Integer.parseOr(parts[1], -1) : 0;
+            if (h < 0 || h > 23 || m < 0 || m > 59) { throw new ValueError("not a time of day: '" + time + "'"); }
+            self.field(0, "${m}");
+            return self.field(1, "${h}");
+        }
+        fn dailyAt(time: string) -> ScheduledTask { return self.at(time); }
+        fn twiceDaily(first: int = 1, second: int = 13) -> ScheduledTask { return self.twiceDailyAt(first, second, 0); }
+        fn twiceDailyAt(first: int, second: int, minute: int) -> ScheduledTask { self.field(0, "${minute}"); return self.field(1, "${first},${second}"); }
+        fn weekly() -> ScheduledTask { self.field(0, "0"); self.field(1, "0"); return self.field(4, "0"); }
+        // On a weekday (0 = Sunday) at a time.
+        fn weeklyOn(weekday: int, time: string = "0:00") -> ScheduledTask { self.at(time); return self.field(4, "${weekday}"); }
+        fn monthly() -> ScheduledTask { self.field(0, "0"); self.field(1, "0"); return self.field(2, "1"); }
+        fn monthlyOn(day: int = 1, time: string = "0:00") -> ScheduledTask { self.at(time); return self.field(2, "${day}"); }
+        fn twiceMonthly(first: int = 1, second: int = 16, time: string = "0:00") -> ScheduledTask { self.at(time); return self.field(2, "${first},${second}"); }
+        fn lastDayOfMonth(time: string = "0:00") -> ScheduledTask { self.at(time); return self.field(2, "L"); }
+        fn quarterly() -> ScheduledTask { self.field(0, "0"); self.field(1, "0"); self.field(2, "1"); return self.field(3, "1,4,7,10"); }
+        fn quarterlyOn(day: int = 1, time: string = "0:00") -> ScheduledTask { self.at(time); self.field(2, "${day}"); return self.field(3, "1,4,7,10"); }
+        fn yearly() -> ScheduledTask { self.field(0, "0"); self.field(1, "0"); self.field(2, "1"); return self.field(3, "1"); }
+        fn yearlyOn(month: int = 1, day: int = 1, time: string = "0:00") -> ScheduledTask { self.at(time); self.field(2, "${day}"); return self.field(3, "${month}"); }
+        fn weekdays() -> ScheduledTask { return self.field(4, "1-5"); }
+        fn weekends() -> ScheduledTask { return self.field(4, "0,6"); }
+        fn mondays() -> ScheduledTask { return self.field(4, "1"); }
+        fn tuesdays() -> ScheduledTask { return self.field(4, "2"); }
+        fn wednesdays() -> ScheduledTask { return self.field(4, "3"); }
+        fn thursdays() -> ScheduledTask { return self.field(4, "4"); }
+        fn fridays() -> ScheduledTask { return self.field(4, "5"); }
+        fn saturdays() -> ScheduledTask { return self.field(4, "6"); }
+        fn sundays() -> ScheduledTask { return self.field(4, "0"); }
+        fn days(list: Array<int>) -> ScheduledTask {
+            let parts = new Array<string>();
+            for (d in list) { parts.push("${d}"); }
+            return self.field(4, Str.join(parts, ","));
+        }
+        // In this zone (the schedule's, else the app's default).
+        fn timezone(tz: string) -> ScheduledTask { TimeZone.of(tz); self.tz = tz; return self; }
+        // Only between two times of day ("22:00" to "06:00" spans midnight).
+        fn between(start: string, end: string) -> ScheduledTask { let me = self; return self.when(fn() -> bool { return me.inWindow(start, end); }); }
+        fn unlessBetween(start: string, end: string) -> ScheduledTask { let me = self; return self.skip(fn() -> bool { return me.inWindow(start, end); }); }
+        private fn inWindow(start: string, end: string) -> bool {
+            let now = self.now();
+            let s = now.setTimeFromTimeString(start);
+            let e = now.setTimeFromTimeString(end);
+            return s.lte(e) ? now.between(s, e) : (now.gte(s) || now.lte(e));
+        }
+
+        // ── conditions ──────────────────────────────────────────────────────────
+        fn when(f: fn() -> bool) -> ScheduledTask { self.filters.push(f); return self; }
+        fn skip(f: fn() -> bool) -> ScheduledTask { self.rejects.push(f); return self; }
+        fn environments(envs: Array<string>) -> ScheduledTask { self.onlyEnvironments = envs; return self; }
+        fn evenInMaintenanceMode() -> ScheduledTask { self.evenInMaintenance = true; return self; }
+        // Not while the previous run still goes (a lock lasting at most `expiresMinutes`).
+        fn withoutOverlapping(expiresMinutes: long = 1440) -> ScheduledTask { self.preventOverlaps = true; self.overlapMinutes = expiresMinutes; return self; }
+        // On one server only, when several run the schedule (a lock per run, in the shared cache).
+        fn onOneServer() -> ScheduledTask { self.oneServer = true; return self; }
+        // In a thread of its own, so the tasks after it start at once.
+        fn runInBackground() -> ScheduledTask { self.background = true; return self; }
+
+        // ── around it ───────────────────────────────────────────────────────────
+        fn name(n: string) -> ScheduledTask { self.taskName = n; return self; }
+        fn description(d: string) -> ScheduledTask { self.taskDescription = d; return self; }
+        fn before(f: fn(ScheduledTask)) -> ScheduledTask { self.befores.push(f); return self; }
+        fn after(f: fn(ScheduledTask)) -> ScheduledTask { self.afters.push(f); return self; }
+        fn then(f: fn(ScheduledTask)) -> ScheduledTask { return self.after(f); }
+        fn onSuccess(f: fn(ScheduledTask)) -> ScheduledTask { self.successes.push(f); return self; }
+        fn onFailure(f: fn(ScheduledTask)) -> ScheduledTask { self.failures.push(f); return self; }
+        // Writes (or appends) a command's output to a file.
+        fn sendOutputTo(path: string) -> ScheduledTask { self.outputFile = path; self.appendOutput = false; return self; }
+        fn appendOutputTo(path: string) -> ScheduledTask { self.outputFile = path; self.appendOutput = true; return self; }
+        // GETs `url` before / after / after a success / after a failure (health checks).
+        fn pingBefore(url: string) -> ScheduledTask { return self.before(fn(t: ScheduledTask) { ScheduledTask.ping(url); }); }
+        fn thenPing(url: string) -> ScheduledTask { return self.after(fn(t: ScheduledTask) { ScheduledTask.ping(url); }); }
+        fn pingOnSuccess(url: string) -> ScheduledTask { return self.onSuccess(fn(t: ScheduledTask) { ScheduledTask.ping(url); }); }
+        fn pingOnFailure(url: string) -> ScheduledTask { return self.onFailure(fn(t: ScheduledTask) { ScheduledTask.ping(url); }); }
+        static fn ping(url: string) { try { new HttpClient().get(url); } catch (e: Exception) {} }
+
+        // ── reading it ──────────────────────────────────────────────────────────
+        fn expression() -> CronExpression { if (self.parsed == null) { self.parsed = CronExpression.parse(self.cronText); } return self.parsed; }
+        fn zone() -> string { return self.tz != "" ? self.tz : (self.schedule != null ? self.schedule.timezone : ""); }
+        fn now() -> Moment { return Moment.now(self.zone()); }
+        // What `schedule:list` shows: the name, else the command, else the job's class.
+        fn label() -> string {
+            if (self.taskName != "") { return self.taskName; }
+            if (self.kind == "command" || self.kind == "exec") { return self.commandLine; }
+            if (self.kind == "job" && self.job != null) { return self.job.displayName(); }
+            return "Closure";
+        }
+        // The key its locks use.
+        fn mutexName() -> string { return "schedule-" + Hash.sha1(self.kind + "|" + self.cronText + "|" + self.label()); }
+        // Whether the time is right at `m` (in its zone).
+        fn isDue(m: Moment) -> bool { return self.expression().isDue(m.inZone(Moment.zoneFor(self.zone()))); }
+        fn nextRunDate(from: Moment) -> Moment { return self.expression().nextRunDate(from.inZone(Moment.zoneFor(self.zone()))); }
+        fn previousRunDate(from: Moment) -> Moment { return self.expression().previousRunDate(from.inZone(Moment.zoneFor(self.zone()))); }
+        // Whether its conditions let it run now (the environment, when(), skip()).
+        fn filtersPass(environment: string) -> bool {
+            if (self.onlyEnvironments.size() > 0 && !self.onlyEnvironments.contains(environment)) { return false; }
+            for (f in self.filters) { if (!f()) { return false; } }
+            for (f in self.rejects) { if (f()) { return false; } }
+            return true;
+        }
+
+        // ── running ─────────────────────────────────────────────────────────────
+        // Runs it now (its locks, hooks and output as configured); whether it succeeded.
+        fn run(cache: CacheRepository) -> bool {
+            let lock: CacheLock = null;
+            if (self.preventOverlaps) {
+                lock = cache.lock(self.mutexName(), self.overlapMinutes * 60);
+                if (!lock.get()) { return false; }
+            }
+            self.lastError = null;
+            self.lastOutput = "";
+            self.exitCode = 0;
+            for (b in self.befores) { b(self); }
+            try { self.execute(); }
+            catch (e: Exception) { self.lastError = e; self.exitCode = 1; }
+            finally { if (lock != null) { lock.release(); } }
+            if (self.outputFile != "" && (self.kind == "command" || self.kind == "exec")) {
+                let f = new File(self.outputFile);
+                if (self.appendOutput && f.exists()) { f.append(self.lastOutput); } else { f.write(self.lastOutput); }
+            }
+            let ok = self.exitCode == 0 && self.lastError == null;
+            for (a in self.afters) { a(self); }
+            if (ok) { for (s in self.successes) { s(self); } } else { for (f in self.failures) { f(self); } }
+            return ok;
+        }
+        private fn execute() {
+            if (self.kind == "call") { self.callback(); return; }
+            if (self.kind == "job") {
+                if (self.schedule == null || self.schedule.queue == null) { throw new StateError("a scheduled job needs the schedule's queue"); }
+                // (a fresh copy each run: the same job object is never queued twice)
+                let copy = JobCodec.rebuild(JobCodec.read(JobCodec.encode(self.job)));
+                self.schedule.queue.dispatch(copy);
+                return;
+            }
+            if (self.kind == "command") {
+                if (self.schedule == null || self.schedule.commands == null) { throw new StateError("a scheduled command needs the schedule's console"); }
+                let run = self.schedule.commands;
+                self.exitCode = run(self.commandLine);
+                self.lastOutput = self.schedule.lastCommandOutput;
+                return;
+            }
+            let r = Process.run(self.commandLine + " 2>&1");
+            self.exitCode = r.code;
+            self.lastOutput = r.output;
+        }
+    }
+}
