@@ -1,0 +1,220 @@
+// cron.grav — cron expressions: whether one is due at a moment, and when it
+// is next (or was last) due.
+//
+//   let c = CronExpression.parse("*/15 9-17 * * MON-FRI")
+//   c.isDue(Moment.now("Africa/Nairobi"))
+//   c.nextRunDate(Moment.now())                       // the next quarter hour in working hours
+//
+// Five fields (minute hour day-of-month month day-of-week), or six with
+// seconds first. Each takes *, ?, numbers, names (JAN…DEC, SUN…SAT), lists
+// (1,15), ranges (9-17), and steps (*/5, 10-40/10). Day-of-month also takes L
+// (the last day) and LW (the last weekday); day-of-week takes 5L (the last
+// Friday) and 1#2 (the second Monday), and 0 or 7 for Sunday. When both day
+// fields are restricted, either matching is enough, as in Vixie cron.
+// Shorthands: @yearly @annually @monthly @weekly @daily @midnight @hourly.
+import "std"
+import "apogee-support"
+
+namespace apogee {
+
+    class CronField {
+        // Which values match (index = value).
+        public allowed: Array<bool>
+        public any: bool = false
+        // Day of month: L, LW. Day of week: nL (last), n#k (k-th).
+        public lastDay: bool = false
+        public lastWeekday: bool = false
+        public lastOfWeekday: Array<int>
+        public nthWeekday: Array<Array<int>>
+        constructor(size: int) {
+            self.allowed = new Array<bool>();
+            for (i in 0..size) { self.allowed.push(false); }
+            self.lastOfWeekday = new Array<int>();
+            self.nthWeekday = new Array<Array<int>>();
+        }
+        fn has(v: int) -> bool { return v >= 0 && v < self.allowed.size() && self.allowed[v]; }
+    }
+
+    class CronExpression {
+        public expression: string
+        public hasSeconds: bool = false
+        public seconds: CronField
+        public minutes: CronField
+        public hours: CronField
+        public days: CronField
+        public months: CronField
+        public weekdays: CronField
+
+        constructor(expression: string) { self.expression = expression; }
+
+        static fn parse(expression: string) -> CronExpression {
+            let e = Str.trim(expression);
+            let shorthand = CronExpression.expand(Str.lower(e));
+            let parts = new Array<string>();
+            for (p in Str.split(shorthand, " ")) { if (p != "") { parts.push(p); } }
+            if (parts.size() != 5 && parts.size() != 6) { throw new ValueError("a cron expression has 5 or 6 fields: '" + expression + "'"); }
+            let c = new CronExpression(e);
+            let off = 0;
+            if (parts.size() == 6) { c.hasSeconds = true; c.seconds = CronExpression.field(parts[0], 0, 59, 60, "", expression); off = 1; }
+            else { c.seconds = CronExpression.field("0", 0, 59, 60, "", expression); }
+            c.minutes = CronExpression.field(parts[off], 0, 59, 60, "", expression);
+            c.hours = CronExpression.field(parts[off + 1], 0, 23, 24, "", expression);
+            c.days = CronExpression.field(parts[off + 2], 1, 31, 32, "dom", expression);
+            c.months = CronExpression.field(parts[off + 3], 1, 12, 13, "month", expression);
+            c.weekdays = CronExpression.field(parts[off + 4], 0, 7, 8, "dow", expression);
+            if (c.weekdays.has(7)) { c.weekdays.allowed[0] = true; }
+            return c;
+        }
+        static fn isValid(expression: string) -> bool { try { CronExpression.parse(expression); return true; } catch (e: ValueError) { return false; } }
+        private static fn expand(e: string) -> string {
+            if (e == "@yearly" || e == "@annually") { return "0 0 1 1 *"; }
+            if (e == "@monthly") { return "0 0 1 * *"; }
+            if (e == "@weekly") { return "0 0 * * 0"; }
+            if (e == "@daily" || e == "@midnight") { return "0 0 * * *"; }
+            if (e == "@hourly") { return "0 * * * *"; }
+            return e;
+        }
+        private static fn name(token: string, kind: string) -> int {
+            let t = Str.lower(token);
+            if (kind == "month") {
+                let m: Array<string> = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+                let i = m.indexOf(t);
+                if (i >= 0) { return i + 1; }
+            }
+            if (kind == "dow") {
+                let d: Array<string> = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+                let i = d.indexOf(t);
+                if (i >= 0) { return i; }
+            }
+            if (!Str.isDigits(t) || t == "") { return -1; }
+            return Integer.parseOr(t, -1) as int;
+        }
+        private static fn field(text: string, min: int, max: int, size: int, kind: string, whole: string) -> CronField {
+            let f = new CronField(size);
+            let bad = fn(why: string) -> ValueError { return new ValueError("bad cron field '" + text + "' in '" + whole + "': " + why); };
+            for (piece in Str.split(text, ",")) {
+                let p = piece;
+                if (p == "*" || p == "?") { f.any = true; for (v in min..=max) { f.allowed[v] = true; } continue; }
+                if (kind == "dom" && (p == "l" || p == "lw")) { if (p == "l") { f.lastDay = true; } else { f.lastWeekday = true; } continue; }
+                if (kind == "dow" && Str.endsWith(p, "l") && p.length > 1) {
+                    let d = CronExpression.name(p[..p.length - 1], kind);
+                    if (d < 0 || d > 7) { throw bad("not a weekday"); }
+                    f.lastOfWeekday.push(d % 7);
+                    continue;
+                }
+                if (kind == "dow" && Str.contains(p, "#")) {
+                    let d = CronExpression.name(Text.before(p, "#"), kind);
+                    let n = Integer.parseOr(Text.after(p, "#"), 0) as int;
+                    if (d < 0 || d > 7 || n < 1 || n > 5) { throw bad("expected weekday#1-5"); }
+                    f.nthWeekday.push([d % 7, n]);
+                    continue;
+                }
+                let step = 1;
+                let range = p;
+                if (Str.contains(p, "/")) {
+                    step = Integer.parseOr(Text.after(p, "/"), 0) as int;
+                    range = Text.before(p, "/");
+                    if (step < 1) { throw bad("a step must be at least 1"); }
+                }
+                let lo = min;
+                let hi = max;
+                if (range != "*" && range != "?") {
+                    if (Str.contains(range, "-")) {
+                        lo = CronExpression.name(Text.before(range, "-"), kind);
+                        hi = CronExpression.name(Text.after(range, "-"), kind);
+                    } else {
+                        lo = CronExpression.name(range, kind);
+                        hi = Str.contains(p, "/") ? max : lo;
+                    }
+                }
+                if (lo < min || hi > max || lo < 0 || hi < 0) { throw bad("out of range ${min}-${max}"); }
+                if (lo > hi) { throw bad("a range must go up"); }
+                let v = lo;
+                while (v <= hi) { f.allowed[v] = true; v += step; }
+            }
+            return f;
+        }
+
+        // Whether it is due at `m` (to the minute; to the second with a seconds field).
+        fn isDue(m: Moment) -> bool {
+            if (self.hasSeconds && !self.seconds.has(m.second())) { return false; }
+            return self.minutes.has(m.minute()) && self.hours.has(m.hour()) && self.months.has(m.month()) && self.dayMatches(m);
+        }
+        private fn dayMatches(m: Moment) -> bool {
+            let domSpecial = self.days.lastDay || self.days.lastWeekday;
+            let dowSpecial = self.weekdays.lastOfWeekday.size() > 0 || self.weekdays.nthWeekday.size() > 0;
+            let domRestricted = !self.days.any || domSpecial;
+            let dowRestricted = !self.weekdays.any || dowSpecial;
+            let dom = self.domMatches(m);
+            let dow = self.dowMatches(m);
+            if (domRestricted && dowRestricted) { return dom || dow; }
+            if (domRestricted) { return dom; }
+            if (dowRestricted) { return dow; }
+            return true;
+        }
+        private fn domMatches(m: Moment) -> bool {
+            if (self.days.has(m.day()) && !self.days.any) { return true; }
+            if (self.days.any && !self.days.lastDay && !self.days.lastWeekday) { return true; }
+            let last = m.daysInMonth();
+            if (self.days.lastDay && m.day() == last) { return true; }
+            if (self.days.lastWeekday) {
+                let d = m.endOfMonth().startOfDay();
+                while (d.isWeekend()) { d = d.subDays(1); }
+                if (m.day() == d.day()) { return true; }
+            }
+            return false;
+        }
+        private fn dowMatches(m: Moment) -> bool {
+            let w = m.dayOfWeek();
+            let special = self.weekdays.lastOfWeekday.size() > 0 || self.weekdays.nthWeekday.size() > 0;
+            if (!self.weekdays.any && self.weekdays.has(w)) { return true; }
+            if (self.weekdays.any && !special) { return true; }
+            for (d in self.weekdays.lastOfWeekday) { if (d == w && m.day() + 7 > m.daysInMonth()) { return true; } }
+            for (pair in self.weekdays.nthWeekday) { if (pair[0] == w && (m.day() - 1) / 7 + 1 == pair[1]) { return true; } }
+            return false;
+        }
+
+        // The first moment after `from` (strictly) when it is due, in `from`'s zone.
+        fn nextRunDate(from: Moment) -> Moment { return self.search(from, true); }
+        // The last moment before `from` (strictly) when it was due.
+        fn previousRunDate(from: Moment) -> Moment { return self.search(from, false); }
+        private fn search(from: Moment, forward: bool) -> Moment {
+            let step = self.hasSeconds ? 1 as long : 60 as long;
+            let m = self.hasSeconds ? from.startOfSecond() : from.startOfMinute();
+            m = forward ? m.addSeconds(step) : m.subSeconds(step);
+            // (jumping whole months, days and hours that cannot match: a few hundred steps at most)
+            for (guard in 0..200000) {
+                if (!self.months.has(m.month())) {
+                    m = forward ? m.addMonths(1).startOfMonth() : m.startOfMonth().subSeconds(1).setSecond(0);
+                    if (!self.hasSeconds && !forward) { m = m.startOfMinute(); }
+                    continue;
+                }
+                if (!self.dayMatches(m)) {
+                    m = forward ? m.addDays(1).startOfDay() : m.startOfDay().subSeconds(1);
+                    if (!self.hasSeconds && !forward) { m = m.startOfMinute(); }
+                    continue;
+                }
+                if (!self.hours.has(m.hour())) {
+                    m = forward ? m.addHours(1).startOfHour() : m.startOfHour().subSeconds(1);
+                    if (!self.hasSeconds && !forward) { m = m.startOfMinute(); }
+                    continue;
+                }
+                if (!self.minutes.has(m.minute())) {
+                    m = forward ? m.addMinutes(1).startOfMinute() : (self.hasSeconds ? m.startOfMinute().subSeconds(1) : m.subMinutes(1));
+                    continue;
+                }
+                if (self.hasSeconds && !self.seconds.has(m.second())) { m = forward ? m.addSeconds(1) : m.subSeconds(1); continue; }
+                return m;
+            }
+            throw new StateError("'" + self.expression + "' is never due");
+        }
+        // The next `n` run dates after `from`.
+        fn nextRunDates(from: Moment, n: int) -> Array<Moment> {
+            let out = new Array<Moment>();
+            let m = from;
+            for (i in 0..n) { m = self.nextRunDate(m); out.push(m); }
+            return out;
+        }
+        fn toString() -> string { return self.expression; }
+    }
+}
