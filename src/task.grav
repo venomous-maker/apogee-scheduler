@@ -50,6 +50,7 @@ namespace apogee {
         private successes: Array<fn(ScheduledTask)>
         private failures: Array<fn(ScheduledTask)>
         private parsed: CronExpression = null
+        private checkedAt: Moment = null
         // (set by the schedule)
         public schedule: Schedule = null
 
@@ -182,7 +183,8 @@ namespace apogee {
         // ── reading it ──────────────────────────────────────────────────────────
         fn expression() -> CronExpression { if (self.parsed == null) { self.parsed = CronExpression.parse(self.cronText); } return self.parsed; }
         fn zone() -> string { return self.tz != "" ? self.tz : (self.schedule != null ? self.schedule.timezone : ""); }
-        fn now() -> Moment { return Moment.now(self.zone()); }
+        // The time its conditions are checked at (the minute the schedule runs), else the clock's.
+        fn now() -> Moment { return self.checkedAt != null ? self.checkedAt.inZone(Moment.zoneFor(self.zone())) : Moment.now(self.zone()); }
         // What `schedule:list` shows: the name, else the command, else the job's class.
         fn label() -> string {
             if (self.taskName != "") { return self.taskName; }
@@ -197,8 +199,11 @@ namespace apogee {
         fn nextRunDate(from: Moment) -> Moment { return self.expression().nextRunDate(from.inZone(Moment.zoneFor(self.zone()))); }
         fn previousRunDate(from: Moment) -> Moment { return self.expression().previousRunDate(from.inZone(Moment.zoneFor(self.zone()))); }
         // Whether its conditions let it run now (the environment, when(), skip()).
-        fn filtersPass(environment: string) -> bool {
+        // `at`: the minute being run, which between() and now() read (null: the clock).
+        fn filtersPass(environment: string, at: Moment = null) -> bool {
             if (self.onlyEnvironments.size() > 0 && !self.onlyEnvironments.contains(environment)) { return false; }
+            self.checkedAt = at;
+            defer { self.checkedAt = null; }
             for (f in self.filters) { if (!f()) { return false; } }
             for (f in self.rejects) { if (f()) { return false; } }
             return true;

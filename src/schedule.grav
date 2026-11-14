@@ -101,7 +101,7 @@ namespace apogee {
                 if (t.repeatSeconds > 0 && now.second() % t.repeatSeconds != 0) { continue; }
                 if (t.repeatSeconds == 0 && now.second() != 0 && t.expression().hasSeconds == false && !self.sameMinuteCall) { continue; }
                 if (down && !t.evenInMaintenance) { continue; }
-                if (!t.filtersPass(self.environment)) { continue; }
+                if (!t.filtersPass(self.environment, now)) { continue; }
                 out.push(t);
             }
             return out;
