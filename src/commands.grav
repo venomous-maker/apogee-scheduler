@@ -1,0 +1,115 @@
+// commands.grav — the schedule's console commands: schedule:run (what cron
+// calls each minute: `* * * * * cd /app && ./app schedule:run`), schedule:work,
+// schedule:list, schedule:test, schedule:interrupt, schedule:clear-cache.
+//
+//   registerScheduleCommands(console)          // the Schedule comes from the container
+import "std"
+import "apogee-console"
+import "apogee-support"
+import "schedule.grav"
+
+namespace apogee {
+
+    fn registerScheduleCommands(console: ConsoleKernel) {
+        console.add::<ScheduleRunCommand>();
+        console.add::<ScheduleWorkCommand>();
+        console.add::<ScheduleListCommand>();
+        console.add::<ScheduleTestCommand>();
+        console.add::<ScheduleInterruptCommand>();
+        console.add::<ScheduleClearCacheCommand>();
+    }
+
+    class ScheduleRunCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "schedule:run"; }
+        fn description() -> string { return "Run the scheduled tasks that are due"; }
+        fn handle(schedule: Schedule) -> int {
+            let out = self.output;
+            let before = schedule.output;
+            schedule.output = fn(line: string) { out.writeln("  " + line); };
+            let r = schedule.runMinute(Moment.now(schedule.timezone));
+            schedule.output = before;
+            if (r.ran.size() == 0 && r.failed.size() == 0) { self.output.infoBlock("No scheduled commands are ready to run."); }
+            return r.failed.size() > 0 ? 1 : 0;
+        }
+    }
+
+    class ScheduleWorkCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "schedule:work"; }
+        fn description() -> string { return "Run the schedule in the foreground, every minute"; }
+        fn handle(schedule: Schedule) -> int {
+            self.output.infoBlock("Running scheduled tasks every minute.");
+            let out = self.output;
+            schedule.output = fn(line: string) { out.writeln("  " + line); };
+            schedule.work();
+            return 0;
+        }
+    }
+
+    class ScheduleListCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "schedule:list {--timezone= : Show the times in this zone} {--next : Sort by when they are next due}"; }
+        fn description() -> string { return "List the scheduled tasks"; }
+        fn handle(schedule: Schedule) -> int {
+            let tz = self.option("timezone") != "" ? self.option("timezone") : schedule.timezone;
+            let now = Moment.now(tz);
+            let tasks = schedule.tasks();
+            if (tasks.size() == 0) { self.output.infoBlock("No scheduled tasks have been defined."); return 0; }
+            if (self.flag("next")) {
+                tasks = collect(tasks).sortBy(fn(t: ScheduledTask) -> double { return t.nextRunDate(now).unix() as double; }).all();
+            }
+            let width = 0;
+            for (t in tasks) { if (t.cronText.length > width) { width = t.cronText.length; } }
+            for (t in tasks) {
+                let next = t.nextRunDate(now).inZone(TimeZone.of(tz == "" ? TimeZone.local().name : tz));
+                let label = t.label() + (t.repeatSeconds > 0 ? " (every ${t.repeatSeconds}s)" : "") + (t.taskDescription == "" ? "" : " — " + t.taskDescription);
+                self.output.twoColumn("<fg=yellow>" + Text.padRight(t.cronText, width) + "</>  " + label,
+                                      "<fg=gray>Next Due:</> " + next.diffForHumans(now));
+            }
+            return 0;
+        }
+    }
+
+    class ScheduleTestCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "schedule:test {--name= : The task to run}"; }
+        fn description() -> string { return "Run a scheduled task now"; }
+        fn handle(schedule: Schedule) -> int {
+            let tasks = schedule.tasks();
+            if (tasks.size() == 0) { self.output.infoBlock("No scheduled tasks have been defined."); return 0; }
+            let t: ScheduledTask = null;
+            let wanted = self.option("name");
+            if (wanted != "") {
+                for (x in tasks) { if (Str.contains(x.label(), wanted)) { t = x; break; } }
+                if (t == null) { self.error("No task matches '" + wanted + "'."); return 1; }
+            } else {
+                let labels = new Array<string>();
+                for (x in tasks) { labels.push(x.label()); }
+                let pick = self.choice("Which task would you like to run?", labels, 0);
+                t = tasks[labels.indexOf(pick)];
+            }
+            let ok = self.task("Running [" + t.label() + "]", fn() -> bool { return t.run(schedule.cache); });
+            if (t.lastOutput != "") { self.output.writeln(t.lastOutput); }
+            return ok ? 0 : 1;
+        }
+    }
+
+    class ScheduleInterruptCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "schedule:interrupt"; }
+        fn description() -> string { return "Stop the seconds tasks of a running schedule:run"; }
+        fn handle(schedule: Schedule) -> int { schedule.interrupt(); self.output.infoBlock("Broadcasting schedule interrupt signal."); return 0; }
+    }
+
+    class ScheduleClearCacheCommand extends ConsoleCommand {
+        constructor() {}
+        fn signature() -> string { return "schedule:clear-cache"; }
+        fn description() -> string { return "Release the locks of tasks that run without overlapping"; }
+        fn handle(schedule: Schedule) -> int {
+            let n = schedule.clearLocks();
+            self.output.infoBlock(n == 0 ? "No mutex files were found." : "Released ${n} lock(s).");
+            return 0;
+        }
+    }
+}

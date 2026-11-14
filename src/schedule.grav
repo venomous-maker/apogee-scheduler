@@ -1,0 +1,212 @@
+// schedule.grav — Schedule: the app's scheduled tasks, and running the due
+// ones (what cron calls every minute as `schedule:run`, or `schedule:work`
+// runs in the foreground).
+//
+//   let schedule = new Schedule(cache)
+//   schedule.timezone = "Africa/Nairobi"
+//   schedule.queue = queue                                  // for job()
+//   schedule.commands = fn(line: string) -> int { return console.call(line) }   // for command()
+//   schedule.command("emails:digest").dailyAt("07:00")
+//   schedule.runMinute(Moment.now())                        // what schedule:run does
+//
+// Tasks due at the minute run in order (runInBackground ones in threads, all
+// joined before it returns). Tasks with a seconds frequency run at their
+// seconds for the rest of the minute, until `schedule:interrupt`.
+import "std"
+import "apogee-support"
+import "apogee-queue"
+import "apogee-events"
+import "grav-cache"
+import "cron.grav"
+import "task.grav"
+
+namespace apogee {
+
+    class ScheduledTaskStarting { public task: string  constructor(task: string) { self.task = task; } }
+    class ScheduledTaskFinished { public task: string  public ms: long  public ok: bool  constructor(task: string, ms: long, ok: bool) { self.task = task; self.ms = ms; self.ok = ok; } }
+    class ScheduledTaskFailed { public task: string  public error: string  constructor(task: string, error: string) { self.task = task; self.error = error; } }
+    class ScheduledTaskSkipped { public task: string  public reason: string  constructor(task: string, reason: string) { self.task = task; self.reason = reason; } }
+
+    // What one run did.
+    class ScheduleRun {
+        public ran: Array<string>
+        public failed: Array<string>
+        public skipped: Array<string>
+        // "label: ms" for each that ran.
+        public timings: Array<string>
+        constructor() { self.ran = new Array<string>(); self.failed = new Array<string>(); self.skipped = new Array<string>(); self.timings = new Array<string>(); }
+        fn merge(o: ScheduleRun) { self.ran.addAll(o.ran); self.failed.addAll(o.failed); self.skipped.addAll(o.skipped); self.timings.addAll(o.timings); }
+    }
+
+    class Schedule {
+        // The zone tasks are read in, unless they name one ("" for the app's).
+        public timezone: string = ""
+        public environment: string = "production"
+        // Locks (withoutOverlapping, onOneServer) and the interrupt flag: a shared store when several servers run it.
+        public cache: CacheRepository
+        public queue: QueueManager = null
+        // Runs a console command line; its exit code (the framework sets it to the console kernel).
+        public commands: fn(string) -> int = null
+        public lastCommandOutput: string = ""
+        public events: Events = null
+        // Whether the app is down for maintenance (tasks then wait, unless evenInMaintenanceMode()).
+        public maintenance: fn() -> bool = null
+        // Each task's line as it runs (schedule:run prints it).
+        public output: fn(string) = null
+        private list: Array<ScheduledTask>
+        private lock: Mutex
+
+        static interruptKey: string = "apogee:schedule:interrupt"
+
+        constructor(cache: CacheRepository = null) {
+            self.cache = cache == null ? new CacheRepository(new MemoryCacheStore()) : cache;
+            self.list = new Array<ScheduledTask>();
+            self.lock = new Mutex();
+        }
+
+        // ── adding ──────────────────────────────────────────────────────────────
+        fn call(f: fn()) -> ScheduledTask { let t = self.add("call"); t.callback = f; return t; }
+        // Puts the job on the queue (a fresh copy each time).
+        fn job(j: Job, queue: string = "", connection: string = "") -> ScheduledTask {
+            if (queue != "") { j.queueName = queue; }
+            if (connection != "") { j.connectionName = connection; }
+            let t = self.add("job");
+            t.job = j;
+            return t;
+        }
+        // Runs a console command ("emails:send --force").
+        fn command(line: string) -> ScheduledTask { let t = self.add("command"); t.commandLine = line; return t; }
+        // Runs a shell command.
+        fn exec(line: string) -> ScheduledTask { let t = self.add("exec"); t.commandLine = line; return t; }
+        private fn add(kind: string) -> ScheduledTask {
+            let t = new ScheduledTask(kind);
+            t.schedule = self;
+            self.list.push(t);
+            return t;
+        }
+        fn tasks() -> Array<ScheduledTask> { return self.list.copy(); }
+        // The task with this label (name, command or job class), or null.
+        fn find(label: string) -> ScheduledTask {
+            for (t in self.list) { if (t.label() == label) { return t; } }
+            return null;
+        }
+
+        // ── running ─────────────────────────────────────────────────────────────
+        // The tasks due at `now` whose conditions pass.
+        fn dueTasks(now: Moment) -> Array<ScheduledTask> {
+            let down = self.maintenance != null && self.maintenance();
+            let out = new Array<ScheduledTask>();
+            for (t in self.list) {
+                if (!t.isDue(now)) { continue; }
+                if (t.repeatSeconds > 0 && now.second() % t.repeatSeconds != 0) { continue; }
+                if (t.repeatSeconds == 0 && now.second() != 0 && t.expression().hasSeconds == false && !self.sameMinuteCall) { continue; }
+                if (down && !t.evenInMaintenance) { continue; }
+                if (!t.filtersPass(self.environment)) { continue; }
+                out.push(t);
+            }
+            return out;
+        }
+        // (runMinute's first pass treats the minute's tasks as due whatever the second)
+        private sameMinuteCall: bool = false
+
+        // Runs what is due at `now` (once); what happened.
+        fn runDue(now: Moment) -> ScheduleRun {
+            let result = new ScheduleRun();
+            let background = new Array<Thread>();
+            let parts = new Array<ScheduleRun>();
+            let partsLock = new Mutex();
+            for (t in self.dueTasks(now)) {
+                if (t.oneServer && !self.cache.add(t.mutexName() + ":" + now.format("YmdHis"), "1", 3600)) {
+                    result.skipped.push(t.label());
+                    self.fire(new ScheduledTaskSkipped(t.label(), "another server runs it"));
+                    continue;
+                }
+                if (t.background) {
+                    let me = self;
+                    background.push(Thread.spawn("schedule", fn() {
+                        let r = me.runOne(t);
+                        partsLock.lock(); parts.push(r); partsLock.unlock();
+                    }));
+                } else { result.merge(self.runOne(t)); }
+            }
+            for (th in background) { th.join(); }
+            for (p in parts) { result.merge(p); }
+            return result;
+        }
+        private fn runOne(t: ScheduledTask) -> ScheduleRun {
+            let r = new ScheduleRun();
+            let label = t.label();
+            if (t.preventOverlaps && self.cache.lock(t.mutexName(), 1).isLocked()) {
+                r.skipped.push(label);
+                self.fire(new ScheduledTaskSkipped(label, "the last run is still going"));
+                return r;
+            }
+            self.fire(new ScheduledTaskStarting(label));
+            let sw = new Stopwatch();
+            let ok = t.run(self.cache);
+            let ms = sw.elapsedMs();
+            if (ok) { r.ran.push(label); } else if (t.preventOverlaps && t.lastError == null && t.exitCode == 0) { r.skipped.push(label); } else {
+                r.failed.push(label);
+                self.fire(new ScheduledTaskFailed(label, t.lastError != null ? t.lastError.message() : "exit code ${t.exitCode}"));
+            }
+            r.timings.push(label + ": ${ms}");
+            self.fire(new ScheduledTaskFinished(label, ms, ok));
+            if (self.output != null) {
+                self.output(Moment.now(self.timezone).toDateTimeString() + " Running [" + label + "] " + Str.repeat(".", 40 - (label.length < 38 ? label.length : 38)) + " ${ms}ms " + (ok ? "DONE" : "FAIL"));
+            }
+            return r;
+        }
+        // What schedule:run does: the minute's tasks at once, then the seconds
+        // tasks at their seconds until the minute ends (or schedule:interrupt).
+        fn runMinute(now: Moment) -> ScheduleRun {
+            let start = now.startOfMinute();
+            self.sameMinuteCall = true;
+            let result = self.runDue(start);
+            self.sameMinuteCall = false;
+            let repeating = false;
+            for (t in self.list) { if (t.repeatSeconds > 0) { repeating = true; } }
+            if (!repeating) { return result; }
+            self.cache.forget(Schedule.interruptKey);
+            let end = start.addMinutes(1);
+            let second = Moment.now(self.timezone).startOfSecond().addSeconds(1);
+            while (second.lt(end)) {
+                let wait = Moment.now(self.timezone).diffInMillis(second, false);
+                if (wait > 0) { Time.sleepMs(wait); }
+                if (self.cache.has(Schedule.interruptKey)) { break; }
+                let due = new Array<ScheduledTask>();
+                for (t in self.list) { if (t.repeatSeconds > 0) { due.push(t); } }
+                if (second.second() != 0) {
+                    let sub = new Schedule(self.cache);
+                    sub.timezone = self.timezone; sub.environment = self.environment; sub.queue = self.queue;
+                    sub.commands = self.commands; sub.events = self.events; sub.maintenance = self.maintenance; sub.output = self.output;
+                    for (t in due) { sub.list.push(t); }
+                    result.merge(sub.runDue(second));
+                }
+                second = second.addSeconds(1);
+            }
+            return result;
+        }
+        // schedule:work: runs every minute, in the foreground, until `stop()`.
+        private stopped: bool = false
+        fn work() {
+            self.stopped = false;
+            while (!self.stopped) {
+                let now = Moment.now(self.timezone);
+                let next = now.startOfMinute().addMinutes(1);
+                Time.sleepMs(now.diffInMillis(next, false));
+                if (self.stopped) { break; }
+                self.runMinute(Moment.now(self.timezone));
+            }
+        }
+        fn stop() { self.stopped = true; }
+        // Ends the seconds tasks' loop of a running schedule:run (schedule:interrupt).
+        fn interrupt() { self.cache.put(Schedule.interruptKey, true, 120); }
+        // Lets go of every overlap lock (schedule:clear-cache).
+        fn clearLocks() -> int {
+            let n = 0;
+            for (t in self.list) { if (t.preventOverlaps) { self.cache.lock(t.mutexName()).forceRelease(); n += 1; } }
+            return n;
+        }
+        private fn fire(e: any) { if (self.events != null) { self.events.dispatch(e); } }
+    }
+}
