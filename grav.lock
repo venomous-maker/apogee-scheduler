@@ -1,10 +1,10 @@
 # grav.lock: exact commits of the installed dependencies (generated; commit this file)
 apogee-support = { source = "github.com/venomous-maker/apogee-support", version = "v0.1.0", commit = "72ff4bd313a3687491f6672c0832943f05737d8d" }
-apogee-queue = { source = "github.com/venomous-maker/apogee-queue", version = "v0.1.0", commit = "44029f7969927da7a47e3797846a857f5d9a94cb" }
+apogee-queue = { source = "github.com/venomous-maker/apogee-queue", version = "v0.1.1", commit = "9815195a8cb1ee8fa9460b792fdc722981acce9e" }
 grav-redis = { source = "github.com/venomous-maker/grav-redis", version = "v0.1.0", commit = "b0200c605a5efc5821c8424f4f65b9799012cc21" }
-grav-db = { source = "github.com/venomous-maker/grav-db", version = "v0.1.0", commit = "9fa0ae4c8b2c2c52797ea62169b9779f6f40ea75" }
-apogee-console = { source = "github.com/venomous-maker/apogee-console", version = "v0.1.0", commit = "d15ee161165f34958071aca97d328bd0b7613e49" }
+grav-db = { source = "github.com/venomous-maker/grav-db", version = "v0.1.1", commit = "fc065e0eb1467e9ca7de80feef1f954ef32420c4" }
+apogee-console = { source = "github.com/venomous-maker/apogee-console", version = "v0.1.1", commit = "8bd0ed420b639711fc766d85fa996ca70d62a38d" }
 apogee-container = { source = "github.com/venomous-maker/apogee-container", version = "v0.1.0", commit = "b418eb81c5d88a51a5e84ab82ce0aa5fb3ea3441" }
 apogee-events = { source = "github.com/venomous-maker/apogee-events", version = "v0.1.0", commit = "e6433f7cd1bc28df539ddc5933d327b4961982ef" }
-grav-cache = { source = "github.com/venomous-maker/grav-cache", version = "v0.1.0", commit = "bec302cc02fa46b1a84a37dd11b2ee09da1594ce" }
-grav-orbit = { source = "github.com/venomous-maker/grav-orbit", version = "v0.1.0", commit = "86edbeab842fe13855319deea2e233519de538f5" }
+grav-cache = { source = "github.com/venomous-maker/grav-cache", version = "v0.1.1", commit = "86c58adb9e4e23fb7fb9c687e3f931a33d671db4" }
+grav-orbit = { source = "github.com/venomous-maker/grav-orbit", version = "v0.1.1", commit = "5bcd616adcd260a9463bdcffd54bb49cbc20e9e3" }
