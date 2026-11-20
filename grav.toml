@@ -1,12 +1,12 @@
 name = "apogee-scheduler"
 lib = "src/all.grav"
-grav = ">=1.7.0"
+grav = ">=1.9.0"
 paths = ["src"]
 
 [dependencies]
-apogee-support = "github.com/venomous-maker/apogee-support@v0.1.0"
-apogee-queue = "github.com/venomous-maker/apogee-queue@v0.1.1"
-apogee-console = "github.com/venomous-maker/apogee-console@v0.1.1"
-apogee-container = "github.com/venomous-maker/apogee-container@v0.1.0"
-apogee-events = "github.com/venomous-maker/apogee-events@v0.1.0"
-grav-cache = "github.com/venomous-maker/grav-cache@v0.1.1"
+apogee-support = "github.com/venomous-maker/apogee-support@v0.2.0"
+apogee-queue = "github.com/venomous-maker/apogee-queue@v0.2.0"
+apogee-console = "github.com/venomous-maker/apogee-console@v0.2.0"
+apogee-container = "github.com/venomous-maker/apogee-container@v0.2.0"
+apogee-events = "github.com/venomous-maker/apogee-events@v0.2.0"
+grav-cache = "github.com/venomous-maker/grav-cache@v0.2.0"
