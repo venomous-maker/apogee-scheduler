@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.2.1 (2026-11-20)
+
 ### Requirements
 
 - Uses the 0.2.1 releases of apogee-queue, apogee-console and grav-cache.
