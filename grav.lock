@@ -1,6 +1,6 @@
 # grav.lock: exact commits of the installed dependencies (generated; commit this file)
 apogee-support = { source = "github.com/venomous-maker/apogee-support", version = "v0.2.0", commit = "de28b7c9fd7a0dbdea53a8d3f07f018f1a00dff5" }
-apogee-queue = { source = "github.com/venomous-maker/apogee-queue", version = "v0.2.1", commit = "6394e2be96d03a45ca72028fc5bbce67dc8bd38b" }
+apogee-queue = { source = "github.com/venomous-maker/apogee-queue", version = "v0.3.0", commit = "b7d1e830f06024f53d3a29a669ac3a4ff7bf8552" }
 grav-redis = { source = "github.com/venomous-maker/grav-redis", version = "v0.2.1", commit = "f3dff2ec9efc3f53d2cd3c394fc412e4776244c3" }
 grav-db = { source = "github.com/venomous-maker/grav-db", version = "v0.2.0", commit = "8d60a239249f8533d750d70625baa0a33b991cfd" }
 apogee-console = { source = "github.com/venomous-maker/apogee-console", version = "v0.2.1", commit = "0035c6db2af5219211cdb9adddddf98b6dba3b9f" }
