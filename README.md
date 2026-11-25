@@ -13,7 +13,7 @@ shell command. Each task has:
 Tasks can run as often as every second. The `schedule:*` console commands
 come with it.
 
-```grav
+```typescript
 import "std"
 import "apogee-scheduler"
 
