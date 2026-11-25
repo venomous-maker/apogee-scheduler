@@ -6,6 +6,8 @@ compiler versions it builds with.
 
 ## Unreleased
 
+## 0.2.3 (2026-11-25)
+
 ### Dependencies
 
 - Uses apogee-queue 0.3.1, apogee-console 0.2.2, grav-cache 0.2.2 (from their GitHub tags).
